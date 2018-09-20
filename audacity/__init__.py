@@ -77,8 +77,12 @@ class Aup:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
 
-    def towav(self, filename, channel, start=0, stop=None):
-        wav = wave.open(filename, "w")
+    def towav(self, filename, channel, start=0, stop=None, aiff_format=False):
+        if aiff_format:
+            import aifc
+            wav = aifc.open(filename, "w")
+        else:
+            wav = wave.open(filename, "w")
         wav.setnchannels(1)
         wav.setsampwidth(2)
         wav.setframerate(self.rate)
