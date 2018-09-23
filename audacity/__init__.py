@@ -4,10 +4,10 @@
 ## audacity/__init__.py .  Main routines for reading Audacity .aup files
 
 import xml.etree.ElementTree as ET
-import wave, os, numpy, struct
+import wave, aifc, os, numpy, struct, io
 
 class Aup:
-    def __init__(self, aupfile):
+    def __init__(self, aupfile, fill_gaps=False):
         fqpath = os.path.join(os.path.curdir, aupfile)
         dir = os.path.dirname(fqpath)
         xml = open(aupfile)
@@ -19,16 +19,43 @@ class Aup:
         self.files = []
         for channel, wavetrack in enumerate(self.root.findall("ns:wavetrack", ns)):
             aufiles = []
-            for b in wavetrack.iter("{%s}simpleblockfile" % ns["ns"]):
-                filename = b.attrib["filename"]
-                d1 = filename[0:3]
-                d2 = "d" + filename[3:5]
-                file = os.path.join(dir, self.project, d1, d2, filename)
-                if not os.path.exists(file):
-                    raise IOError("File missing in %s: %s" % (self.project, file))
-                else:
-                    aufiles.append((file, int(b.attrib["len"])))
+            for c in wavetrack.iter("{%s}waveclip" % ns["ns"]):
+                start = int(float(c.attrib["offset"]) * self.rate)
+                for b in c.iter("{%s}simpleblockfile" % ns["ns"]):
+                    filename = b.attrib["filename"]
+                    d1 = filename[0:3]
+                    d2 = "d" + filename[3:5]
+                    file = os.path.join(dir, self.project, d1, d2, filename)
+                    if not os.path.exists(file):
+                        raise IOError("File missing in %s: %s" % (self.project, file))
+                    else:
+                        aufiles.append((open(file, 'rb'), start, int(b.attrib["len"])))
+            aufiles = sorted(aufiles, key=lambda x: x[1])
+
+            if fill_gaps:
+                total_length = aufiles[-1][-2] + aufiles[-1][-1]
+                blocks = []
+                for b in aufiles:
+                    blocks.append([b[1],b[2]])
+                gap_found = True
+                gap_start = 0
+                data = io.BytesIO()
+
+                for sample in range(total_length):
+                    if gap_found:
+                        data.write(struct.pack('f', 0))
+                    for block in blocks:
+                        if sample == block[0] and gap_found:
+                            aufiles.append((data, gap_start, sample + 1))
+                            data = io.BytesIO()
+                            gap_found = False
+                        if sample == (block[0] + block[1]) and not gap_found:
+                            gap_found = True
+                            gap_start = sample
+                aufiles = sorted(aufiles, key=lambda x: x[1])
+
             self.files.append(aufiles)
+
         self.nchannels = len(self.files)
         self.aunr = -1
 
@@ -51,9 +78,9 @@ class Aup:
         i = 0
         length = 0
         for i, f in enumerate(self.files[self.channel]):
-            s += f[1]
+            s += f[2]
             if s > pos:
-                length = f[1]
+                length = f[2]
                 break
         if pos >= s:
             raise EOFError("Seek past end of file")
@@ -64,8 +91,8 @@ class Aup:
         if self.aunr < 0:
             raise IOError("File not opened")
         while self.aunr < len(self.files[self.channel]):
-            with open(self.files[self.channel][self.aunr][0], 'rb') as fd:
-                fd.seek((self.offset - self.files[self.channel][self.aunr][1]) * 4, 2)
+            with self.files[self.channel][self.aunr][0] as fd:
+                fd.seek(int(self.offset - self.files[self.channel][self.aunr][2]) * 4, 2)
                 data = fd.read()
                 yield data
             self.aunr += 1
@@ -79,7 +106,6 @@ class Aup:
 
     def towav(self, filename, channel, start=0, stop=None, aiff_format=False):
         if aiff_format:
-            import aifc
             wav = aifc.open(filename, "w")
         else:
             wav = wave.open(filename, "w")
@@ -95,7 +121,13 @@ class Aup:
                 shorts = numpy.short(numpy.clip(numpy.frombuffer(data, numpy.float32) * scale, -scale, scale-1))
                 if stop and len(shorts) > length:
                     shorts = shorts[range(length)]
-                format = "<" + str(len(shorts)) + "h"
+
+                if aiff_format:
+                    format = ">"
+                else:
+                    format = "<"
+                format +=  str(len(shorts)) + "h"
+
                 wav.writeframesraw(struct.pack(format, *shorts))
                 if stop:
                     length -= len(shorts)
